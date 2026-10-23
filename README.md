@@ -52,9 +52,14 @@ both.
 | `/start` | help |
 | `/new` | start a fresh session |
 | `/status` | session id, agent, workspace |
+| `/abort` | interrupt the turn in progress |
 | `/id` | your Telegram user and chat ids |
 
 Anything else is sent to the assistant as a prompt.
+
+While a turn runs, the reply message is rewritten about once per second, so the
+answer appears as it is generated. A footer with the turn cost and duration is
+appended when it finishes.
 
 ## The agent
 
@@ -68,13 +73,38 @@ answer yet. A read-only agent cannot block. Permission buttons arrive in step 3.
 To make it write-capable before then, flip those three `deny` entries to `ask`
 and answer the requests from a terminal running `opencode` in this directory.
 
-## Scope of this step
+## How a turn runs
 
-Working: text in, reply out, session continuity, allowlist, long replies split
-at Telegram's 4096-character limit.
+`/api/event` is an SSE stream, consumed by one background thread and routed by
+session id. Text arrives as `session.text.delta` and is rewritten into the same
+Telegram message; reasoning deltas are dropped, not shown.
 
-Not here yet: streaming output, a "working..." indicator, permission buttons,
-per-turn cost display, systemd. Those are steps 2 to 4.
+The final answer is always re-read from `/api/session/{id}/message` rather than
+taken from the stream. If the stream drops, the live preview degrades but the
+reply does not.
+
+Telegram rate-limits edits, so the preview is throttled to one rewrite per 1.2
+seconds and skipped when the text did not change.
+
+## Scope
+
+Done: streaming output, `/abort`, per-turn cost, session continuity, allowlist,
+long replies split at Telegram's 4096-character limit.
+
+Not done: permission buttons, a second user, systemd. Those are steps 3 to 5 of
+`SPEC.md`.
+
+## Known cost of the global instructions
+
+The `remote` agent replaces the base system prompt, but OpenCode still injects
+the global instruction files (`~/.config/opencode/AGENTS.md`). Measured effect:
+a three-sentence reply cost $0.011 with about 28k cached input tokens, because
+the model reasons about the injected memory protocol before answering. Turns
+land around 25 to 30 seconds for the same reason.
+
+That overhead belongs to the channel, not to the question. Reducing it is a
+configuration decision, not a code change; it is recorded in `SPEC.md` as an
+open question.
 
 ## Security notes
 

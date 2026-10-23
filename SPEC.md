@@ -66,13 +66,16 @@ Acceptance: a Telegram message produces an assistant reply; sessions persist
 across restarts; a rejected user receives their own id; replies over 4000
 characters split cleanly; the process leaves no orphan server.
 
-### Phase 2 — usable
+### Phase 2 — usable (done)
 
 Acceptance: the reply appears and updates while the turn runs; `/abort`
 interrupts; per-turn cost is reported; a slow turn is visible within 2 seconds.
 
-Known work: subscribe to `/api/event` instead of polling `/message`, edit one
-Telegram message at most once per second, handle flood control.
+Verified: preview rewrites throttled to 1.2 seconds, `/abort` ends the turn in
+6 seconds and the worker thread exits, cost footer from `session.step.ended`.
+
+Known work left for later: the preview shows tool activity by name only, and a
+long answer still splits into separate messages rather than paginating one.
 
 ### Phase 3 — safe
 
@@ -113,9 +116,30 @@ Measured against OpenCode 2.1.4, not assumed from documentation.
 - Writing `.env.example` is blocked by the runtime's environment-file policy;
   `env.example` is the equivalent file.
 
+Streaming, measured on `/api/event`:
+
+- The stream is SSE: `data: {json}` lines, `: heartbeat` comments, and one
+  `server.connected` event with an empty payload at connect time.
+- Every event carries `type` plus `data.sessionID`, so routing is by session.
+- `session.text.delta` carries `{ordinal, delta}`. `session.text.ended` carries
+  `{ordinal, text}` with the full text for that ordinal and supersedes the
+  deltas.
+- `session.reasoning.delta` is the model's thinking, not the answer. Never
+  render it.
+- `session.tool.called` names the tool in `name`, not in `tool`.
+- `session.step.ended` is the reliable per-step cost source: `cost` and
+  `tokens`. `session.usage.updated` is cumulative for the whole session.
+- `session.execution.succeeded` is terminal. Treat every `session.execution.*`
+  other than `.started` as terminal.
+- `/api/session/{id}/message` never exposes partial text: a message stays empty
+  until the turn completes. Live output exists only in the event stream.
+
 ## Open questions
 
 - Which model should the phone channel use? Cost per turn dominates perceived
   quality on short messages.
 - Does the secondary user get her own workspace directory or a shared one?
 - Should `/new` also rotate the workspace?
+- How do we stop the global instruction files from loading for this agent? A
+  three-sentence reply costs about $0.011 and 25 to 30 seconds because the model
+  reasons about an injected memory protocol that this channel never uses.
