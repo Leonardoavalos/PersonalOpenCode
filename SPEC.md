@@ -1,6 +1,6 @@
 # Spec — Personal OpenCode remote over Telegram
 
-Status: phase 1 of 5 implemented. Phases 2 to 5 specified, not built.
+Status: phases 1 to 3 of 5 implemented. Phases 4 and 5 specified, not built.
 
 ## Problem
 
@@ -77,12 +77,16 @@ Verified: preview rewrites throttled to 1.2 seconds, `/abort` ends the turn in
 Known work left for later: the preview shows tool activity by name only, and a
 long answer still splits into separate messages rather than paginating one.
 
-### Phase 3 — safe
+### Phase 3 — safe (done)
 
 Acceptance: a permission request surfaces in Telegram with allow and deny
 buttons; the decision reaches `/api/session/{id}/permission/{requestID}/reply`;
 `edit` and `shell` move from `deny` to `ask`; an unanswered request expires
 instead of hanging forever.
+
+Verified: a live round trip approved a write and the file appeared on disk; a
+rejected shell request left no file behind; an unanswered request rejects itself
+after the TTL; `/abort` rejects pending requests before interrupting.
 
 ### Phase 4 — shared
 
@@ -133,6 +137,20 @@ Streaming, measured on `/api/event`:
   other than `.started` as terminal.
 - `/api/session/{id}/message` never exposes partial text: a message stays empty
   until the turn completes. Live output exists only in the event stream.
+
+Permissions:
+
+- A request arrives as the `permission.asked` event and through
+  `GET /api/session/{id}/permission`. Both carry the same object:
+  `{id, sessionID, action, resources, save, metadata, source}`.
+- `action` is `edit` or `shell`. For `edit`, `resources` holds file paths and
+  `metadata.files[]` holds the patch. For `shell`, `resources` holds the command.
+- Answer with `POST /api/session/{id}/permission/{requestID}/reply` and body
+  `{"decision": "once" | "always" | "reject"}`. It returns 204. The body is
+  `decision`, not `reply`; a wrong key is a bare 400.
+- Rejecting is enforced: the write did not happen on disk.
+- A rejected action can end the turn with empty assistant text, so the bridge
+  substitutes its own explanation instead of showing an empty reply.
 
 Config isolation:
 

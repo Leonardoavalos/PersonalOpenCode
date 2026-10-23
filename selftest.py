@@ -35,6 +35,9 @@ class RecorderTelegram:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.edits: list[tuple[int, int, str]] = []
+        self.keyboards: list[tuple[int, str, dict]] = []
+        self.keyboard_edits: list[tuple[int, int, str, dict | None]] = []
+        self.callbacks: list[tuple[str, str]] = []
         self.next_id = 100
 
     def send_message(self, chat_id: int, text: str) -> int:
@@ -44,6 +47,23 @@ class RecorderTelegram:
 
     def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
         self.edits.append((chat_id, message_id, text))
+
+    def send_keyboard(self, chat_id: int, text: str, keyboard: dict) -> int:
+        self.keyboards.append((chat_id, text, keyboard))
+        self.next_id += 1
+        return self.next_id
+
+    def edit_keyboard(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        keyboard: dict | None = None,
+    ) -> None:
+        self.keyboard_edits.append((chat_id, message_id, text, keyboard))
+
+    def answer_callback(self, callback_id: str, text: str = "") -> None:
+        self.callbacks.append((callback_id, text))
 
 
 def test_event_stream() -> None:
@@ -128,10 +148,100 @@ def test_live_turn() -> None:
     print(f"      final: {final[:120]!r}...")
 
 
+def test_permissions() -> None:
+    print("\n-- permission broker --")
+    replies: list[tuple[str, str, str]] = []
+
+    class FakeOC:
+        def permission_reply(self, session_id: str, request_id: str, decision: str) -> None:
+            replies.append((session_id, request_id, decision))
+
+    tg = RecorderTelegram()
+    turns: dict[str, bot.Turn] = {}
+    lock = threading.Lock()
+    turn = bot.Turn("ses_perm", 99)
+    turns["ses_perm"] = turn
+    broker = bot.PermissionBroker(FakeOC(), tg, turns, lock, ttl=0.4)  # type: ignore[arg-type]
+
+    request = {
+        "id": "per_long_identifier_that_would_break_callback_data",
+        "sessionID": "ses_perm",
+        "action": "edit",
+        "resources": ["notes.md", "spec.md"],
+    }
+    broker.ask(request)
+    check("a prompt with a keyboard was sent", len(tg.keyboards) == 1, str(len(tg.keyboards)))
+    token = next(iter(broker.pending))
+    check("token is short enough for callback_data", len(f"{token}:reject") <= 64, token)
+
+    label = broker.answer(token, "once")
+    check("allow replies to the server", replies and replies[-1][2] == "once", str(replies[-1:]))
+    check("answered request is removed", token not in broker.pending)
+    check("no rejection counted on allow", turn.rejected == 0, str(turn.rejected))
+    check("the button message is settled", bool(tg.keyboard_edits), str(tg.keyboard_edits[:1]))
+    check("stale taps report settled", broker.answer(token, "once") == bot.STRINGS["perm_settled"])
+
+    broker.ask({**request, "id": "per_second", "action": "shell", "resources": ["rm -rf build"]})
+    token2 = next(iter(broker.pending))
+    label2 = broker.answer(token2, "reject")
+    check("reject replies to the server", replies[-1][2] == "reject", str(replies[-1:]))
+    check("reject is counted on the turn", turn.rejected == 1, str(turn.rejected))
+    check("reject label is reported", label2 == bot.STRINGS["perm_rejected"], label2)
+
+    broker.ask({**request, "id": "per_third"})
+    token3 = next(iter(broker.pending))
+    time.sleep(0.9)
+    check("an unanswered request expires", token3 not in broker.pending)
+    check("expiry rejects on the server", replies[-1][2] == "reject", str(replies[-1:]))
+    check("expiry increments the rejection count", turn.rejected == 2, str(turn.rejected))
+
+    broker.ask({**request, "id": "per_fourth"})
+    broker.cancel_session("ses_perm")
+    check("aborting a session rejects its pending requests", not broker.pending)
+    check("abort reason is visible", any("interrumpido" in e[2] for e in tg.keyboard_edits), str(tg.keyboard_edits[-1][2][-40:]))
+
+
+def test_live_permission() -> None:
+    print("\n-- live permission round trip --")
+    bot.load_dotenv()
+    base_url = bot.setting("OPENCODE_URL") or "http://127.0.0.1:4096"
+    password = bot.setting("OPENCODE_PASSWORD")
+    workspace = bot.setting("WORKSPACE") or str(ROOT)
+    if not password:
+        check("OPENCODE_PASSWORD is set", False)
+        return
+
+    oc = bot.OpenCode(base_url, password, workspace, "remote")
+    sid = oc.create_session()
+    prompt_id = oc.prompt(sid, "Create a file named bt_perm_probe.txt containing the word hola.")
+
+    request = None
+    for _ in range(60):
+        time.sleep(0.5)
+        pending = oc._request("GET", f"/api/session/{sid}/permission") or []
+        if pending:
+            request = pending[0]
+            break
+    check("a permission request arrived", request is not None, str((request or {}).get("action")))
+    if request is None:
+        return
+
+    check("request names the file", request["resources"] == ["bt_perm_probe.txt"], str(request["resources"]))
+    oc.permission_reply(sid, request["id"], "once")
+    reply = oc.await_reply(sid, prompt_id)
+    target = Path(workspace) / "bt_perm_probe.txt"
+    check("approval let the write through", target.exists(), str(target))
+    check("turn produced text", bool(reply), f"{len(reply)} chars")
+    if target.exists():
+        target.unlink()
+
+
 def main() -> int:
     test_event_stream()
     test_chunking()
+    test_permissions()
     test_live_turn()
+    test_live_permission()
     print()
     if FAILED:
         print(f"{len(FAILED)} check(s) failed: {', '.join(FAILED)}")

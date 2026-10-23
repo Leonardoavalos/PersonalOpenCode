@@ -34,6 +34,7 @@ POLL_SECONDS = 30
 TURN_TIMEOUT = 900
 PREVIEW_INTERVAL = 1.2
 PREVIEW_MIN_CHARS = 24
+PERMISSION_TTL = 120
 
 # User-facing copy is Spanish because both users of this bot are Spanish
 # speakers. Keep it neutral and change it here if that ever stops being true.
@@ -56,6 +57,17 @@ STRINGS = {
     "nothing_running": "No hay ningún turno en curso.",
     "gone": "La sesión ya no existía; la reinicié. Mandá el mensaje de nuevo.",
     "empty": "(respuesta vacía)",
+    "perm_edit": "El agente quiere editar: {what}",
+    "perm_shell": "El agente quiere ejecutar:\n{what}",
+    "perm_other": "El agente quiere {action}: {what}",
+    "perm_allow": "Permitir",
+    "perm_deny": "Rechazar",
+    "perm_allowed": "Permitido",
+    "perm_rejected": "Rechazado",
+    "perm_expired": "expiró",
+    "perm_settled": "ya estaba resuelto",
+    "perm_not_yours": "No autorizado.",
+    "perm_blocked": "No pude seguir: rechazaste el permiso.",
 }
 
 
@@ -121,6 +133,7 @@ class Turn:
         self.error = ""
         self.started = time.time()
         self.aborted = False
+        self.rejected = 0
         self.previewed = ""
 
     def add_delta(self, ordinal: int, delta: str) -> None:
@@ -146,6 +159,7 @@ class EventStream:
         self.oc = oc
         self.turns = turns
         self.lock = lock
+        self.on_permission = None
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -208,6 +222,10 @@ class EventStream:
         elif kind.startswith("session.execution.") and kind != "session.execution.started":
             turn.outcome = kind.rsplit(".", 1)[-1]
             turn.done.set()
+        elif kind == "permission.asked":
+            handler = self.on_permission
+            if handler is not None:
+                handler(payload)
 
 
 class OpenCode:
@@ -274,6 +292,14 @@ class OpenCode:
     def interrupt(self, session_id: str) -> None:
         self._request("POST", f"/api/session/{session_id}/interrupt", {}, timeout=30)
 
+    def permission_reply(self, session_id: str, request_id: str, decision: str) -> None:
+        self._request(
+            "POST",
+            f"/api/session/{session_id}/permission/{request_id}/reply",
+            {"decision": decision},
+            timeout=30,
+        )
+
     def messages(self, session_id: str, limit: int = 50) -> list:
         return self._request("GET", f"/api/session/{session_id}/message?limit={limit}") or []
 
@@ -332,10 +358,50 @@ class Telegram:
             raise RuntimeError(f"telegram {method} -> HTTP {exc.code}: {body[:300]}") from exc
 
     def get_updates(self, offset: int | None) -> list:
-        payload: dict = {"timeout": POLL_SECONDS, "allowed_updates": ["message"]}
+        payload: dict = {
+            "timeout": POLL_SECONDS,
+            "allowed_updates": ["message", "callback_query"],
+        }
         if offset is not None:
             payload["offset"] = offset
         return self._call("getUpdates", payload, timeout=POLL_SECONDS + 15).get("result", [])
+
+    def answer_callback(self, callback_id: str, text: str = "") -> None:
+        try:
+            self._call(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": text[:200]},
+            )
+        except Exception as exc:  # noqa: BLE001 - a stale callback is not an error
+            log(f"answerCallbackQuery failed: {exc}")
+
+    def send_keyboard(self, chat_id: int, text: str, keyboard: dict) -> int:
+        result = self._call(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text[:MAX_TELEGRAM_CHARS],
+                "reply_markup": keyboard,
+                "disable_web_page_preview": True,
+            },
+        )
+        return result.get("result", {}).get("message_id")
+
+    def edit_keyboard(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        keyboard: dict | None = None,
+    ) -> None:
+        payload: dict = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text[:MAX_TELEGRAM_CHARS],
+            "disable_web_page_preview": True,
+        }
+        payload["reply_markup"] = keyboard or {"inline_keyboard": []}
+        self._call("editMessageText", payload)
 
     def send_message(self, chat_id: int, text: str) -> int:
         for chunk in chunk_text(text) or [STRINGS["empty"]]:
@@ -358,6 +424,140 @@ class Telegram:
         )
 
 
+def describe_permission(request: dict) -> str:
+    action = request.get("action") or "?"
+    resources = request.get("resources") or []
+    shown = "\n".join(f"» {item}" for item in resources[:5]) or "» (sin detalle)"
+    if action == "edit":
+        return STRINGS["perm_edit"].format(what=shown)
+    if action == "shell":
+        return STRINGS["perm_shell"].format(what=shown)
+    return STRINGS["perm_other"].format(action=action, what=shown)
+
+
+class PermissionBroker:
+    """Turns `permission.asked` events into Telegram buttons.
+
+    Every request gets a short token so `callback_data` stays inside Telegram's
+    64-byte limit regardless of how long the OpenCode request id is. A request
+    that nobody answers is rejected after `ttl` seconds, so a turn can never hang
+    forever waiting on a phone that walked away.
+    """
+
+    def __init__(
+        self,
+        oc: OpenCode,
+        tg: Telegram,
+        turns: dict[str, Turn],
+        lock: threading.Lock,
+        ttl: int = PERMISSION_TTL,
+    ) -> None:
+        self.oc = oc
+        self.tg = tg
+        self.turns = turns
+        self.turns_lock = lock
+        self.ttl = ttl
+        self.pending: dict[str, dict] = {}
+        self.lock = threading.Lock()
+        self.counter = 0
+
+    def _chat_for(self, session_id: str) -> int | None:
+        with self.turns_lock:
+            turn = self.turns.get(session_id)
+        return turn.chat_id if turn else None
+
+    def _keyboard(self, token: str) -> dict:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": f"✅ {STRINGS['perm_allow']}", "callback_data": f"{token}:once"},
+                    {"text": f"❌ {STRINGS['perm_deny']}", "callback_data": f"{token}:reject"},
+                ]
+            ]
+        }
+
+    def ask(self, request: dict) -> None:
+        session_id = request.get("sessionID") or ""
+        request_id = request.get("id") or ""
+        chat_id = self._chat_for(session_id)
+        if chat_id is None or not request_id:
+            log(f"permission {request_id}: nothing to ask in, rejecting")
+            self._reply(session_id, request_id, "reject")
+            return
+
+        text = describe_permission(request)
+        with self.lock:
+            self.counter += 1
+            token = f"p{self.counter}"
+            entry = {
+                "session_id": session_id,
+                "request_id": request_id,
+                "chat_id": chat_id,
+                "message_id": None,
+                "text": text,
+            }
+            self.pending[token] = entry
+        try:
+            entry["message_id"] = self.tg.send_keyboard(chat_id, text, self._keyboard(token))
+        except Exception as exc:  # noqa: BLE001 - never leave the turn blocked
+            log(f"permission prompt failed: {exc}")
+            self._settle(token, "reject", "no se pudo preguntar")
+            return
+
+        timer = threading.Timer(self.ttl, self._expire, args=(token,))
+        timer.daemon = True
+        entry["timer"] = timer
+        timer.start()
+
+    def answer(self, token: str, decision: str) -> str:
+        return self._settle(token, decision, None)
+
+    def cancel_session(self, session_id: str) -> None:
+        with self.lock:
+            tokens = [t for t, e in self.pending.items() if e["session_id"] == session_id]
+        for token in tokens:
+            self._settle(token, "reject", "turno interrumpido")
+
+    def _expire(self, token: str) -> None:
+        self._settle(token, "reject", STRINGS["perm_expired"])
+
+    def _settle(self, token: str, decision: str, reason: str | None) -> str:
+        with self.lock:
+            entry = self.pending.pop(token, None)
+        if entry is None:
+            return STRINGS["perm_settled"]
+
+        timer = entry.get("timer")
+        if timer is not None:
+            timer.cancel()
+
+        self._reply(entry["session_id"], entry["request_id"], decision)
+        if decision == "reject":
+            with self.turns_lock:
+                turn = self.turns.get(entry["session_id"])
+            if turn is not None:
+                turn.rejected += 1
+
+        label = STRINGS["perm_allowed"] if decision == "once" else STRINGS["perm_rejected"]
+        if reason:
+            label = f"{label} ({reason})"
+        message_id = entry.get("message_id")
+        if message_id:
+            try:
+                self.tg.edit_keyboard(entry["chat_id"], message_id, f"{entry['text']}\n\n{label}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"permission settle edit failed: {exc}")
+        return label
+
+    def _reply(self, session_id: str, request_id: str, decision: str) -> None:
+        if not session_id or not request_id:
+            return
+        try:
+            self.oc.permission_reply(session_id, request_id, decision)
+        except OpenCodeError as exc:
+            log(f"permission reply failed: {exc}")
+
+
 class Bridge:
     def __init__(self, oc: OpenCode, tg: Telegram, sessions_path: Path = SESSIONS_PATH) -> None:
         self.oc = oc
@@ -367,6 +567,8 @@ class Bridge:
         self.turns: dict[str, Turn] = {}
         self.lock = threading.Lock()
         self.stream = EventStream(oc, self.turns, self.lock)
+        self.broker = PermissionBroker(oc, tg, self.turns, self.lock)
+        self.stream.on_permission = self.broker.ask
         self.allowed: set[int] = set()
 
     # -- state -----------------------------------------------------------
@@ -452,8 +654,12 @@ class Bridge:
         if not reply:
             if turn.parts:
                 reply = turn.preview()
+            elif turn.aborted:
+                reply = STRINGS["aborted"]
+            elif turn.rejected:
+                reply = STRINGS["perm_blocked"]
             else:
-                reply = STRINGS["aborted"] if turn.aborted else STRINGS["empty"]
+                reply = STRINGS["empty"]
 
         self.deliver(chat_id, placeholder, reply, self.footer(turn))
 
@@ -475,6 +681,24 @@ class Bridge:
         for extra in chunks[1:]:
             self.tg.send_message(chat_id, extra)
 
+    def handle_callback(self, update: dict) -> None:
+        callback = update.get("callback_query") or {}
+        callback_id = callback.get("id")
+        data = callback.get("data") or ""
+        user_id = (callback.get("from") or {}).get("id")
+        if self.allowed and user_id not in self.allowed:
+            log(f"rejected callback from user_id={user_id}")
+            self.tg.answer_callback(callback_id, STRINGS["perm_not_yours"])
+            return
+
+        token, _, decision = data.partition(":")
+        if decision not in ("once", "reject"):
+            self.tg.answer_callback(callback_id, STRINGS["perm_settled"])
+            return
+
+        label = self.broker.answer(token, decision)
+        self.tg.answer_callback(callback_id, label)
+
     def abort(self, chat_id: int) -> str:
         session_id = (self.sessions.get(str(chat_id)) or {}).get("session")
         with self.lock:
@@ -482,6 +706,7 @@ class Bridge:
         if turn is None:
             return STRINGS["nothing_running"]
         turn.aborted = True
+        self.broker.cancel_session(session_id)
         try:
             self.oc.interrupt(session_id)
         except OpenCodeError as exc:
@@ -490,6 +715,10 @@ class Bridge:
 
     # -- transport -------------------------------------------------------
     def handle_update(self, update: dict) -> None:
+        if "callback_query" in update:
+            self.handle_callback(update)
+            return
+
         message = update.get("message") or {}
         text = (message.get("text") or "").strip()
         chat_id = (message.get("chat") or {}).get("id")

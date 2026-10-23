@@ -61,17 +61,21 @@ While a turn runs, the reply message is rewritten about once per second, so the
 answer appears as it is generated. A footer with the turn cost and duration is
 appended when it finishes.
 
-## The agent
+## The agent and its permissions
 
-`.opencode/agents/remote.md` defines the `remote` agent. **It is read-only on
-purpose**: reads, glob, grep and web tools are allowed; `edit`, `shell` and
-`subagent` are denied.
+`.opencode/agents/remote.md` defines the `remote` agent. Reads, glob, grep and
+web tools are allowed. `edit` and `shell` are `ask`: the turn blocks and a
+message appears in Telegram with ✅ Permitir / ❌ Rechazar.
 
-The reason is mechanical, not caution for its own sake. An `ask` permission
-blocks the turn until someone answers the prompt, and this channel has no way to
-answer yet. A read-only agent cannot block. Permission buttons arrive in step 3.
-To make it write-capable before then, flip those three `deny` entries to `ask`
-and answer the requests from a terminal running `opencode` in this directory.
+- One tap approves **one** action. Approval is not remembered between turns.
+- Nobody tapping is an answer: the bridge rejects the request after 120 seconds,
+  so a turn can never hang forever on a phone that walked away.
+- `/abort` rejects every pending request for that session before interrupting.
+- Only allowlisted Telegram users can tap. A tapped button reports its outcome
+  in a toast, and a stale tap says it was already resolved.
+
+To make the agent fully autonomous, change `ask` to `allow` in the agent file —
+and understand that you are then handing an unattended agent your filesystem.
 
 ## How a turn runs
 
@@ -88,11 +92,11 @@ seconds and skipped when the text did not change.
 
 ## Scope
 
-Done: streaming output, `/abort`, per-turn cost, session continuity, allowlist,
-long replies split at Telegram's 4096-character limit.
+Done: streaming output, `/abort`, per-turn cost, agent approval buttons,
+session continuity, allowlist, long replies split at Telegram's 4096-character
+limit.
 
-Not done: permission buttons, a second user, systemd. Those are steps 3 to 5 of
-`SPEC.md`.
+Not done: a second user, systemd. Those are steps 4 and 5 of `SPEC.md`.
 
 ## Config isolation
 
