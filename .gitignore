@@ -2,4 +2,5 @@
 sessions.json
 sessions.tmp
 serve.log
+sandbox/
 __pycache__/
