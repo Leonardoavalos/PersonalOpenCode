@@ -134,12 +134,21 @@ Streaming, measured on `/api/event`:
 - `/api/session/{id}/message` never exposes partial text: a message stays empty
   until the turn completes. Live output exists only in the event stream.
 
+Config isolation:
+
+- `OPENCODE_CONFIG_DIR` relocates the whole global config directory for one
+  server process. Pointing it at an almost empty directory removes the global
+  instruction files, plugins and MCP servers from the session prompt.
+- Measured effect on the same model and agent: cached input tokens 10,496 to
+  3,072, reasoning tokens 150-412 to 32-53, latency 11.6s to 6.5s, cost roughly
+  halved to a third.
+- Project discovery is unaffected: the agent still loads from
+  `.opencode/agents/` under the workspace. Providers and credentials survived
+  because they do not live in the config directory.
+
 ## Open questions
 
 - Which model should the phone channel use? Cost per turn dominates perceived
   quality on short messages.
 - Does the secondary user get her own workspace directory or a shared one?
 - Should `/new` also rotate the workspace?
-- How do we stop the global instruction files from loading for this agent? A
-  three-sentence reply costs about $0.011 and 25 to 30 seconds because the model
-  reasons about an injected memory protocol that this channel never uses.

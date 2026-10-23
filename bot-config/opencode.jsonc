@@ -1,0 +1,14 @@
+{
+  // Deliberately almost empty.
+  //
+  // run.sh points OPENCODE_CONFIG_DIR here so the bot's server does not load
+  // the owner's global config directory. That directory holds a 146 KB
+  // opencode.json and a 16.8 KB AGENTS.md, whose instruction files were being
+  // injected into every Telegram turn: 10,496 cached input tokens and up to 412
+  // reasoning tokens for a one-word reply, against 3,072 and 53 with this
+  // directory in place. Measured on 2.1.4 with the same model.
+  //
+  // The agent lives in the project (.opencode/agents/remote.md) and is still
+  // discovered from the workspace, so isolation costs nothing here.
+  "$schema": "https://opencode.ai/config.json"
+}

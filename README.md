@@ -94,17 +94,28 @@ long replies split at Telegram's 4096-character limit.
 Not done: permission buttons, a second user, systemd. Those are steps 3 to 5 of
 `SPEC.md`.
 
-## Known cost of the global instructions
+## Config isolation
 
-The `remote` agent replaces the base system prompt, but OpenCode still injects
-the global instruction files (`~/.config/opencode/AGENTS.md`). Measured effect:
-a three-sentence reply cost $0.011 with about 28k cached input tokens, because
-the model reasons about the injected memory protocol before answering. Turns
-land around 25 to 30 seconds for the same reason.
+`run.sh` points `OPENCODE_CONFIG_DIR` at `bot-config/`, which holds an almost
+empty `opencode.jsonc`. That keeps the owner's global OpenCode directory — a
+146 KB `opencode.json` and a 16.8 KB `AGENTS.md` — out of every Telegram turn.
 
-That overhead belongs to the channel, not to the question. Reducing it is a
-configuration decision, not a code change; it is recorded in `SPEC.md` as an
-open question.
+Measured on 2.1.4 with the same model, same agent, same one-word prompt, two runs
+per case:
+
+| | global config | isolated config |
+| --- | --- | --- |
+| latency | 11.5 – 11.7 s | 6.2 – 6.8 s |
+| cost | $0.0039 – 0.0065 | $0.0016 – 0.0018 |
+| cached input tokens | 10,496 | 3,072 |
+| reasoning tokens | 150 – 412 | 32 – 53 |
+
+The agent still loads from `.opencode/agents/remote.md` because discovery follows
+the workspace, not the config dir. Providers and credentials are unaffected.
+
+If you want a command, skill or MCP server available to the bot, put it under
+`bot-config/` rather than in the global directory, or it will silently re-add the
+same overhead.
 
 ## Security notes
 
