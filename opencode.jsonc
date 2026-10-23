@@ -1,0 +1,5 @@
+{
+  // Consumed only when this directory (or a child of it) is the workspace.
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "remote"
+}
