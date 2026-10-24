@@ -1,6 +1,6 @@
 # Spec — Personal OpenCode remote over Telegram
 
-Status: phases 1 to 3 of 5 implemented. Phases 4 and 5 specified, not built.
+Status: phases 1, 2, 3 and 5 implemented. Phase 4 specified, not built.
 
 ## Problem
 
@@ -94,13 +94,20 @@ Acceptance: the second allowlisted user gets a separate session, a separate
 workspace, and a skill authored by the owner. They cannot see the owner's
 sessions, cost, or configuration.
 
-### Phase 5 — durable
+### Phase 5 — durable (done)
 
 Acceptance: survives logout and reboot; restarts on failure; logs rotate; a
 crash does not lose the session map.
 
-Deliberately last: until phases 2 and 3 exist, running it 24/7 adds risk without
-adding value.
+Verified: `SIGKILL` on the bridge was noticed and the unit restarted itself with
+a new process id and a fresh server; stopping the unit released port 4096 with no
+orphan process; linger is on, so closing every terminal does not stop it; the
+unit is enabled under `default.target`. Logs go to journald, which rotates them;
+the per-run `serve.log` is truncated on every start rather than appended.
+
+Honest limit: a Windows reboot does not start a WSL distro, so the bridge comes
+back on the next WSL launch, not on boot. Closing that last gap needs a
+Windows-side logon task, which is deliberately out of scope here.
 
 ## Verified API facts
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenCode Telegram bridge
+Documentation=file://%PROJECT%/README.md
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%PROJECT%
+# `opencode` lives in ~/.opencode/bin, which systemd does not put on PATH.
+# Without this the unit dies instantly with "opencode: command not found".
+Environment=PATH=%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%PROJECT%/run.sh
+Restart=always
+RestartSec=10
+# Take the child `opencode serve` down with the bridge instead of leaving it
+# listening on a port nobody owns.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=25
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-telegram
+
+[Install]
+WantedBy=default.target

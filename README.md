@@ -45,6 +45,44 @@ One OpenCode session per Telegram chat, remembered in `sessions.json`.
 `run.sh` starts `opencode serve`, waits for it, then runs the bot. Ctrl+C stops
 both.
 
+## Running permanently
+
+`run.sh` dies with its terminal. To keep the bridge alive, install the systemd
+user service:
+
+```sh
+./deploy/install-service.sh
+```
+
+It writes `~/.config/systemd/user/opencode-telegram.service`, enables linger so
+the service survives closing every terminal, and starts it.
+
+```sh
+systemctl --user status opencode-telegram   # current state
+journalctl --user -u opencode-telegram -f   # live logs
+systemctl --user restart opencode-telegram  # after editing .env
+systemctl --user disable --now opencode-telegram  # stop for good
+```
+
+The unit puts `~/.opencode/bin` on `PATH` explicitly. systemd does not inherit
+your shell `PATH`, and without that line the service dies instantly with
+`opencode: command not found`.
+
+`KillMode=control-group` means stopping the bridge also stops the `opencode serve`
+child, so no orphan server keeps holding the port.
+
+### What it survives, and what it does not
+
+| Event | Survives |
+| --- | --- |
+| the bot crashes | yes, `Restart=always` after 10s |
+| you close every terminal | yes, via linger |
+| `wsl --shutdown` then reopening WSL | yes, `WantedBy=default.target` |
+| Windows reboot | **no** — WSL does not start a distro until you open one |
+
+The last row is the honest limit of anything installed inside WSL. Closing it
+needs a Windows-side trigger at logon, which is a separate decision.
+
 ## Commands
 
 | Command | Effect |
@@ -94,9 +132,9 @@ seconds and skipped when the text did not change.
 
 Done: streaming output, `/abort`, per-turn cost, agent approval buttons,
 session continuity, allowlist, long replies split at Telegram's 4096-character
-limit.
+limit, and a systemd service that survives crashes and closed terminals.
 
-Not done: a second user, systemd. Those are steps 4 and 5 of `SPEC.md`.
+Not done: a second user. That is step 4 of `SPEC.md`.
 
 ## Config isolation
 
