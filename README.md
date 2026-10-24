@@ -78,10 +78,37 @@ child, so no orphan server keeps holding the port.
 | the bot crashes | yes, `Restart=always` after 10s |
 | you close every terminal | yes, via linger |
 | `wsl --shutdown` then reopening WSL | yes, `WantedBy=default.target` |
-| Windows reboot | **no** — WSL does not start a distro until you open one |
+| Windows reboot | only with the logon task below |
 
-The last row is the honest limit of anything installed inside WSL. Closing it
-needs a Windows-side trigger at logon, which is a separate decision.
+### Starting at Windows logon
+
+WSL starts no distro on its own, so after a reboot the service waits for
+somebody to open WSL. This task closes that gap:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-logon-task.ps1
+```
+
+Run it from Windows PowerShell. It needs no elevation: `schtasks /sc onlogon`
+refuses with "Acceso denegado", but the PowerShell `Register-ScheduledTask`
+cmdlet succeeds for the current user.
+
+The task runs:
+
+```
+wsl.exe -d Ubuntu --exec /bin/sh -c "exec sleep infinity"
+```
+
+The `sleep` is deliberate. Windows shuts an idle WSL VM down, which would take
+the service with it; a long-lived exec keeps a client attached for as long as
+you are logged on. The task is interactive-only, so logging off stops it and
+logging back on starts it again.
+
+Remove it with:
+
+```powershell
+Unregister-ScheduledTask -TaskName 'OpenCodeTelegram' -Confirm:$false
+```
 
 ## Commands
 
