@@ -164,6 +164,14 @@ Config isolation:
   `.opencode/agents/` under the workspace. Providers and credentials survived
   because they do not live in the config directory.
 
+## Verification log
+
+- 2026-10-24 — first run against the real Telegram client. The first-run
+  procedure passed end to end: streaming preview and cost footer, approval
+  button produced the file, rejection left no file behind, an unanswered
+  request expired on its own, and `/abort` cut a running turn. Phases 1 to 3 are
+  verified in production, not only headless.
+
 ## Open questions
 
 - Which model should the phone channel use? Cost per turn dominates perceived
