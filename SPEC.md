@@ -105,9 +105,15 @@ orphan process; linger is on, so closing every terminal does not stop it; the
 unit is enabled under `default.target`. Logs go to journald, which rotates them;
 the per-run `serve.log` is truncated on every start rather than appended.
 
-Honest limit: a Windows reboot does not start a WSL distro, so the bridge comes
-back on the next WSL launch, not on boot. Closing that last gap needs a
-Windows-side logon task, which is deliberately out of scope here.
+The Windows side is covered by `deploy/windows/install-logon-task.ps1`, which
+registers an at-logon task running
+`wsl.exe -d Ubuntu --exec /bin/sh -c "exec sleep infinity"`. The long-lived exec
+is not decoration: Windows shuts an idle WSL VM down, and an attached client is
+what keeps the service inside it alive.
+
+Verified for that layer: the task registers without elevation, executes, holds
+the anchor process, and the service stays active. Not verified: an actual
+Windows logoff and logon, which is the one step that needs a real session cycle.
 
 ## Verified API facts
 
